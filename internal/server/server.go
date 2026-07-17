@@ -176,8 +176,20 @@ func newHandler(cfg Config, backend webcaldav.Backend) http.Handler {
 	root := basicAuth(cfg.AuthUser, cfg.AuthPassword, h)
 	root = readinessGate(cfg.Ready, root)
 	root = healthzMiddleware(cfg.Ready, cfg.PollerLastOK, root)
+	// Request-body cap (security audit 2026-07-17): go-webdav decodes PUT
+	// (ical) and PROPFIND/REPORT (xml) bodies fully in memory with no limit of
+	// its own — an authenticated multi-GB PUT would OOM the daemon. Every
+	// other interceptor already caps its body (outbox, proppatch); this is the
+	// outermost belt for the rest. The cap also keeps any accepted iCalendar
+	// body within putguard's inspection window (its nesting-depth guard).
+	root = http.MaxBytesHandler(root, maxRequestBody)
 	return root
 }
+
+// maxRequestBody bounds ANY request body accepted by the daemon. A real
+// CalDAV PUT is a few KiB; 8 MiB is beyond generous and matches
+// putguardMaxInspect so no accepted calendar body escapes inspection.
+const maxRequestBody = 8 << 20
 
 // readinessGate short-circuits EVERY route with 503 + Retry-After while ready
 // is false: the port opens at second 1 (the tcp watchdog no longer kills the
@@ -253,8 +265,19 @@ func basicAuth(user, password string, next http.Handler) http.Handler {
 }
 
 // clientIP extracts the real client IP behind nginx (X-Real-IP, else the first
-// X-Forwarded-For, else RemoteAddr).
+// X-Forwarded-For, else RemoteAddr). The proxy headers are honored ONLY when
+// the direct peer is loopback (i.e. the local reverse proxy): a non-loopback
+// peer could forge X-Real-IP to poison the fail2ban auth-failure log — banning
+// an arbitrary victim IP or masking its own (security audit 2026-07-17).
 func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		// Direct external connection: the socket address is authoritative.
+		return host
+	}
 	if ip := r.Header.Get("X-Real-IP"); ip != "" {
 		return ip
 	}
@@ -263,10 +286,6 @@ func clientIP(r *http.Request) string {
 			return strings.TrimSpace(xff[:i])
 		}
 		return strings.TrimSpace(xff)
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
 	}
 	return host
 }

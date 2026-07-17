@@ -158,3 +158,23 @@ func TestPutGuardGiantBodyPassesIntact(t *testing.T) {
 	rec, next := doPut(t, "text/calendar", big)
 	assertPassthrough(t, rec, next, big)
 }
+
+func TestPutGuardNestingDepthRefused(t *testing.T) {
+	// go-ical's decoder recurses per BEGIN with no depth guard (fatal stack
+	// overflow at pathological depth) — the guard must refuse before parse.
+	var b strings.Builder
+	b.WriteString("BEGIN:VCALENDAR\r\n")
+	for i := 0; i < maxComponentDepth+10; i++ {
+		b.WriteString("BEGIN:X\r\n")
+	}
+	rec, next := doPut(t, "text/calendar", b.String())
+	assertRefusal(t, rec, next, "nesting-depth")
+}
+
+func TestPutGuardNormalDepthPasses(t *testing.T) {
+	// The deepest REAL shape (VCALENDAR > VEVENT > VALARM) stays far under the
+	// cap and must pass untouched.
+	body := "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nBEGIN:VALARM\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	rec, next := doPut(t, "text/calendar", body)
+	assertPassthrough(t, rec, next, body)
+}

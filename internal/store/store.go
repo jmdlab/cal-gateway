@@ -361,8 +361,29 @@ func (s *Store) dropAliasesToLocked(calendarID string, ids map[string]struct{}) 
 func (s *Store) ReplaceCalendars(cals []proton.Calendar) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// The poller calls this every cycle; the calendar list almost never
+	// changes. Skipping the no-op replace avoids re-marshaling the WHOLE
+	// store (all decrypted events) every cycle just for persistLocked's hash
+	// to conclude "unchanged" (perf audit 2026-07-17).
+	if calendarsEqual(s.data.Calendars, cals) {
+		return nil
+	}
 	s.data.Calendars = append([]proton.Calendar(nil), cals...)
 	return s.persistLocked()
+}
+
+// calendarsEqual reports element-wise equality (proton.Calendar is a small
+// all-string struct, directly comparable).
+func calendarsEqual(a, b []proton.Calendar) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ReplaceCalendarEvents atomically replaces ALL the events of a calendar with

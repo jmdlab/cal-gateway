@@ -10,9 +10,9 @@ export CGO_ENABLED
 
 .PHONY: build test vet fmt lint run help
 
-## build: compile a static binary
+## build: compile a static, stripped, reproducible-path binary
 build:
-	CGO_ENABLED=$(CGO_ENABLED) go build $(GOFLAGS) -o $(BINARY) $(PKG)
+	CGO_ENABLED=$(CGO_ENABLED) go build $(GOFLAGS) -trimpath -ldflags "-s -w" -o $(BINARY) $(PKG)
 
 ## test: run unit tests (mocked, no network; live tests are opt-in — see CONTRIBUTING.md)
 test:

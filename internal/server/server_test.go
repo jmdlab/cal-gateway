@@ -6,6 +6,8 @@ package server
 // backend is enough.
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -134,5 +136,48 @@ func TestHealthzNonLoopback(t *testing.T) {
 	// IPv6 loopback accepted.
 	if rec := doReq(h, "/healthz", "[::1]:4444"); rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200 from ::1", rec.Code)
+	}
+}
+
+// TestClientIPProxyHeaderTrust: the proxy headers (X-Real-IP / X-Forwarded-For)
+// are honored ONLY from a loopback peer (the local nginx). A direct external
+// connection could forge them to poison the fail2ban auth log — its socket
+// address must win.
+func TestClientIPProxyHeaderTrust(t *testing.T) {
+	mk := func(remote, realIP string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = remote
+		if realIP != "" {
+			r.Header.Set("X-Real-IP", realIP)
+		}
+		return r
+	}
+	if got := clientIP(mk("127.0.0.1:9999", "203.0.113.7")); got != "203.0.113.7" {
+		t.Errorf("loopback peer: X-Real-IP must be honored, got %q", got)
+	}
+	if got := clientIP(mk("198.51.100.4:9999", "203.0.113.7")); got != "198.51.100.4" {
+		t.Errorf("external peer: forged X-Real-IP must be IGNORED, got %q", got)
+	}
+	if got := clientIP(mk("198.51.100.4:9999", "")); got != "198.51.100.4" {
+		t.Errorf("external peer, no headers: socket host expected, got %q", got)
+	}
+}
+
+// TestMaxRequestBodyCap: a body over maxRequestBody must be cut off by the
+// outermost http.MaxBytesHandler — never read fully into memory (the pre-fix
+// behavior allowed an authenticated multi-GB PUT to OOM the daemon).
+func TestMaxRequestBodyCap(t *testing.T) {
+	seen := 0
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		seen = len(b)
+	})
+	h := http.MaxBytesHandler(inner, maxRequestBody)
+	big := bytes.NewReader(make([]byte, maxRequestBody+1024))
+	req := httptest.NewRequest(http.MethodPut, "/alice/calendars/cal1/evt.ics", big)
+	req.Header.Set("Content-Type", "text/calendar")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if seen > maxRequestBody {
+		t.Fatalf("handler read %d bytes — the cap (%d) did not apply", seen, maxRequestBody)
 	}
 }

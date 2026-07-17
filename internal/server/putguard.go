@@ -92,17 +92,33 @@ func isCalendarContentType(ct string) bool {
 	return mediaType == "text/calendar"
 }
 
+// maxComponentDepth bounds BEGIN: nesting. A real iCalendar object is 3 deep
+// (VCALENDAR > VEVENT > VALARM); go-ical's decoder recurses per BEGIN with no
+// depth guard of its own, and a few million nested BEGINs are a fatal (non
+// recoverable) stack overflow — so a pathological depth is refused here, before
+// the body ever reaches the parser (security audit 2026-07-17).
+const maxComponentDepth = 64
+
 // evaluatePutPolicies scans the unfolded iCal and returns the name of the
 // refused component (for the DAV:error body) if a policy applies.
 func evaluatePutPolicies(body []byte) (name string, refused bool) {
+	depth := 0
 	for _, line := range unfoldICalLines(body) {
-		switch strings.ToUpper(line) {
+		upper := strings.ToUpper(line)
+		switch upper {
 		case "BEGIN:VTODO":
 			return "VTODO", true
 		case "BEGIN:VJOURNAL":
 			return "VJOURNAL", true
 		case "BEGIN:VFREEBUSY":
 			return "VFREEBUSY", true
+		}
+		if strings.HasPrefix(upper, "BEGIN:") {
+			if depth++; depth > maxComponentDepth {
+				return "nesting-depth", true
+			}
+		} else if strings.HasPrefix(upper, "END:") && depth > 0 {
+			depth--
 		}
 	}
 	return "", false

@@ -82,8 +82,10 @@ func LoadSession(dataDir string) (Session, error) {
 		if err != nil {
 			// Sealed blob but unreadable: wrong key or corruption. We do NOT
 			// destroy it (re-login TOTP required to rebuild) — clear error, the
-			// operator decides.
-			return Session{}, fmt.Errorf("proton: session unreadable (at-rest key?): %w", err)
+			// operator decides. Wrapped as ErrSessionInvalid so serve exits 78
+			// (RestartPreventExitStatus) instead of crash-looping forever on a
+			// state that can never self-heal (audit 2026-07-17).
+			return Session{}, fmt.Errorf("proton: session unreadable (at-rest key missing or rotated?): %v: %w", err, ErrSessionInvalid)
 		}
 	}
 
