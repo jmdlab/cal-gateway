@@ -1,0 +1,18 @@
+# cal-gateway-watchdog — oneshot health probe, driven by the paired .timer.
+# Install:
+#   sudo cp deploy/cal-gateway-watchdog.sh /usr/local/bin/
+#   sudo chmod +x /usr/local/bin/cal-gateway-watchdog.sh
+#   sudo cp deploy/cal-gateway-watchdog.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cal-gateway-watchdog.timer
+[Unit]
+Description=cal-gateway health watchdog (restart if /healthz is not 2xx)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Needs to restart the service, so it runs as root by default. The script only
+# probes a loopback URL and runs `systemctl restart`.
+ExecStart=/usr/local/bin/cal-gateway-watchdog.sh
+# Override the defaults here if needed, e.g.:
+# Environment=SERVICE=cal-gateway HEALTH_URL=http://127.0.0.1:5232/healthz

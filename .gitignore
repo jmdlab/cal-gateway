@@ -1,0 +1,20 @@
+# Secrets & local state — never committed
+config.toml
+config.local.toml
+session.json
+session.json.tmp
+store.json
+store.json.tmp
+.atrest.key
+.atrest.key.tmp
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.creds
+*.eml
+*.log
+
+# Built binary
+/cal-gateway
+.claude/

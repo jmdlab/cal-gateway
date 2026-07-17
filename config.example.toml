@@ -1,0 +1,57 @@
+# cal-gateway — example configuration.
+# Copy to config.toml (gitignored) and adapt.
+
+# CalDAV server listen address. Loopback only:
+# TLS is terminated by a reverse proxy (nginx) in front — see DEPLOYMENT.md.
+# Never bind this to a public interface.
+listen_addr = "127.0.0.1:5232"
+
+# Local data directory: persisted Proton session + shadow store.
+# Treat this directory like a password (session.json is a full session grant).
+data_dir = "data"
+
+# Proton delta poll interval.
+poll_interval = "60s"
+
+[account]
+# Proton account to bridge. No password here:
+# `cal-gateway login` performs the interactive login (supervised 2FA) and
+# persists the session to data_dir.
+# Use a secondary / family account, never your primary one.
+username = "user@proton.me"
+
+[auth]
+# CalDAV server Basic auth: credentials DEDICATED to the gateway
+# (the ones you enter in your CalDAV client) — NEVER your Proton password.
+# Pick a strong, unique password before exposing the service.
+username = "caldav"
+password = "change-me"
+
+[invite]
+# OUTGOING iMIP invitations: sent through the local Proton Bridge SMTP server
+# (cleartext on loopback — external exposure is wrapped elsewhere).
+# enabled=false or section absent: a PUT carrying an outgoing ATTENDEE → 403.
+enabled = false
+smtp_host = "127.0.0.1"
+smtp_port = 1025
+# Bridge account address = the invitation organizer (the account owner).
+username = "user@example.com"
+# The BRIDGE password (the one Proton Bridge displays) —
+# NEVER your Proton password.
+password = "bridge-password-here"
+# Display name of the sender in the email.
+from_name = "Account Owner"
+# OUTGOING RSVP is active as soon as enabled=true: a PUT that only changes the
+# account owner's own PARTSTAT on an event organized by someone else emits an
+# iMIP REPLY and patches that attendee line, instead of a 403 ATTENDEE-FOREIGN.
+#
+# INCOMING RSVP (the "attendee accepted" badge on the organizer side) is
+# RESERVED and not implemented. Proton updates PARTSTAT on REPLY client-side
+# (webmail), so the badge is not free for a CalDAV-only client. The read-only
+# IMAP watcher is not built yet (see docs/FEATURE-MATRIX.md §3);
+# leave watch_replies=false until it ships.
+watch_replies = false
+# imap_host = "127.0.0.1"
+# imap_port = 1143
+# imap_username = "user@example.com"
+# imap_password = "bridge-password-here"

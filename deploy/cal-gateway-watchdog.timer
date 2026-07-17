@@ -1,0 +1,15 @@
+# Runs the watchdog every 2 minutes (first run 2 min after boot).
+#
+# Non-systemd (cron) alternative — add to root's crontab instead of this timer:
+#   */2 * * * * /usr/local/bin/cal-gateway-watchdog.sh >/dev/null 2>&1
+[Unit]
+Description=Run cal-gateway health watchdog every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=cal-gateway-watchdog.service
+
+[Install]
+WantedBy=timers.target
