@@ -139,9 +139,9 @@ Proton.
 - **Does**: read events, create/update/delete events, recurring series
   (RRULE/EXDATE/exceptions), timezones/DST, alarms, and — optionally — outgoing
   iMIP invitations and RSVPs.
-- **Doesn't** (by design or not yet): "this-and-future" single-occurrence edits,
-  VTODO/VJOURNAL/VFREEBUSY, floating-time events, and a number of cosmetic
-  iCalendar properties Proton has no model for.
+- **Doesn't**: "this-and-future" single-occurrence edits, VTODO/VJOURNAL/VFREEBUSY,
+  floating-time events, and a number of cosmetic iCalendar properties — each for a
+  concrete reason, spelled out under [Limitations](#limitations) below.
 
 The exact per-feature policy (pass / strip / refuse / emulate), the recurrence
 matrix, and the RFC citations live in
@@ -217,19 +217,42 @@ Copy it to `config.toml` (gitignored) and edit. Safe defaults: loopback
 `listen_addr`, `invite.enabled = false`, a `change-me` placeholder password you
 must replace.
 
-## Limitations / roadmap
+## Limitations
 
-- **THISANDFUTURE** single-occurrence edits (`RANGE=THISANDFUTURE`) are refused
-  (403) pending a dedicated series-split design.
-- **Per-occurrence RSVP / per-occurrence invitations** on recurring series are
-  refused; the master series is supported.
-- **Incoming RSVP badge** ("attendee accepted") is not wired up: Proton updates
-  attendee status client-side, so it is not free for a CalDAV-only client. A
-  read-only IMAP watcher design is reserved but not built.
-- Unsupported components (VTODO/VJOURNAL/VFREEBUSY) and floating-time events are
-  refused with an honest 403, never a silent no-op.
+This isn't a "coming soon" list. Each item below is a deliberate refusal with a
+reason: the daemon returns an honest `403` rather than accept something Proton
+can't store faithfully and then silently corrupt your calendar. "Never a silent
+no-op" is the whole design ethos.
 
-See [docs/FEATURE-MATRIX.md](docs/FEATURE-MATRIX.md) for the complete state.
+- **VTODO / VJOURNAL / VFREEBUSY.** We don't accept them because Proton Calendar
+  stores *only* events (`VEVENT`) — there is no todo or journal object in its
+  model. The only ways to "support" them would be to fake them as events or drop
+  them silently, and both lie to the client. (Free-busy *queries* are still
+  answered at the scheduling outbox; they're simply not persisted.)
+- **Floating-time events** (a time with no timezone — "15:00, wherever I am").
+  We refuse them because Proton pins *every* event to a TZID, so storing a
+  floating event means silently picking a zone for it — which shifts the actual
+  time when you travel or across DST. Better a clear refusal than moving your
+  appointment behind your back.
+- **"This-and-future" edits** (`RANGE=THISANDFUTURE` — "this and all following
+  occurrences"). This is the one genuine gap: Proton *can* represent it (its own
+  app splits series), so it's not a model limit. We haven't done it because doing
+  it correctly means splitting the series — capping the old `RRULE` with `UNTIL`,
+  spawning a new one from the split point, and carrying over every past exception
+  and attendee state without losing history. We'd rather refuse it than ship a
+  series editor that's subtly wrong. Editing the **whole** series works today.
+- **Per-occurrence RSVP / invitations** on a recurring series. Refused for the
+  same series-integrity reason; the master series is supported.
+- **Incoming RSVP status** ("attendee accepted" badges). Not shown, because
+  Proton updates attendee status inside its *own* client — a CalDAV-only bridge
+  can't see it without watching the mailbox, and we didn't build the read-only
+  IMAP watcher that would surface it.
+- **Cosmetic iCalendar properties** Proton has no field for (per-event color,
+  arbitrary `X-` properties, …). Stripped on the round-trip rather than
+  pretended-kept, so what the client shows is what's actually stored.
+
+See [docs/FEATURE-MATRIX.md](docs/FEATURE-MATRIX.md) for the complete
+pass/strip/refuse/emulate policy.
 
 ## Prior art & acknowledgements
 
