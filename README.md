@@ -16,19 +16,15 @@ back, re-encrypting writes into Proton's four-card model.
 
 ## Why this exists
 
-I'll be honest up front: this project cuts against Proton's whole philosophy,
-and I know it. Proton is built around end-to-end encryption and its own official
-clients — a self-hosted bridge that holds a decrypted session and re-serves your
-calendar over CalDAV to third-party apps is, by design, at odds with that model.
-I'm not hiding that behind a clever framing; it's a deliberate, eyes-open
-trade-off.
+This project cuts against Proton's philosophy, and I know it. Proton is built on
+end-to-end encryption and its own apps; a self-hosted bridge that decrypts your
+calendar and re-serves it over CalDAV to third-party apps works against that
+model. That's a deliberate, eyes-open trade-off — not something I'm dressing up.
 
-So why build it? For a concrete family reason. My wife is moving her digital life
-off the default Apple apps and onto Proton, as part of a broader "exit Big Tech"
-move — but she wants to keep using the **native** apps she already knows (Apple
-Calendar, Apple Mail) rather than switch to Proton's apps. Proton ships an
-official **Bridge for Mail**, but there is no equivalent for **Calendar**. This
-fills that one gap: it lets her stay in Apple Calendar while her data actually
+Why build it anyway? A family reason. My wife is moving off the default Apple
+apps onto Proton, but wants to keep the **native** apps she knows (Apple
+Calendar, Apple Mail). Proton ships an official **Bridge for Mail** — but none
+for **Calendar**. This fills that gap: she stays in Apple Calendar while her data
 lives in Proton.
 
 I'm a Proton user and supporter, and I genuinely hope this project becomes
