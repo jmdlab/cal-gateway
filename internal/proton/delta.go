@@ -154,7 +154,7 @@ func (a *Account) CalendarEventChanges(ctx context.Context, calendarID, sinceCur
 			if rerr != nil {
 				return CalendarDelta{}, rerr
 			}
-			ev := decryptEvent(row.CalendarEvent, calKR)
+			ev := a.decryptEvent(row.CalendarEvent, row.AddressKeyPacket, calKR)
 			ev.Notifications = parseNotifications(row.Notifications)
 			ev.RecurrenceID = row.RecurrenceID
 			delta.Upserts = append(delta.Upserts, ev)

@@ -479,7 +479,7 @@ func (a *Account) ListEvents(ctx context.Context, calendarID string, start, end 
 
 	out := make([]Event, 0, len(rows))
 	for _, raw := range rows {
-		ev := decryptEvent(raw.CalendarEvent, calKR)
+		ev := a.decryptEvent(raw.CalendarEvent, raw.AddressKeyPacket, calKR)
 		ev.Notifications = parseNotifications(raw.Notifications)
 		ev.RecurrenceID = raw.RecurrenceID
 		out = append(out, ev)
@@ -505,7 +505,7 @@ func (a *Account) ListEventsByUID(ctx context.Context, calendarID, uid string) (
 	}
 	out := make([]Event, 0, len(rows))
 	for _, raw := range rows {
-		ev := decryptEvent(raw.CalendarEvent, calKR)
+		ev := a.decryptEvent(raw.CalendarEvent, raw.AddressKeyPacket, calKR)
 		ev.Notifications = parseNotifications(raw.Notifications)
 		ev.RecurrenceID = raw.RecurrenceID
 		out = append(out, ev)
@@ -598,7 +598,7 @@ func (a *Account) GetEvent(ctx context.Context, calendarID, eventID string) (*Ev
 		return nil, err
 	}
 	if row, rerr := a.getEventRow(ctx, calendarID, eventID); rerr == nil {
-		ev := decryptEvent(row.CalendarEvent, calKR)
+		ev := a.decryptEvent(row.CalendarEvent, row.AddressKeyPacket, calKR)
 		ev.Notifications = parseNotifications(row.Notifications)
 		ev.RecurrenceID = row.RecurrenceID
 		return &ev, nil
@@ -615,7 +615,7 @@ func (a *Account) GetEvent(ctx context.Context, calendarID, eventID string) (*Ev
 		}
 		return nil, fmt.Errorf("proton: fetching event %s/%s: %w", calendarID, eventID, err)
 	}
-	ev := decryptEvent(raw, calKR)
+	ev := a.decryptEvent(raw, "", calKR)
 	return &ev, nil
 }
 

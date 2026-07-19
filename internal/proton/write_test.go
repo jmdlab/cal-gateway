@@ -130,7 +130,7 @@ func TestSealRoundTrip(t *testing.T) {
 		t.Fatalf("expected encrypted card, got type %d", sharedEnc.Type)
 	}
 	part := papi.CalendarEventPart{Type: papi.CalendarEventType(sharedEnc.Type), Data: sharedEnc.Data}
-	plain, err := cardPlaintext(part, body.SharedKeyPacket, calKR)
+	plain, err := (&Account{}).cardPlaintext(part, body.SharedKeyPacket, calKR)
 	if err != nil {
 		t.Fatalf("cardPlaintext: %v", err)
 	}

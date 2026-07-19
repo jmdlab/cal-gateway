@@ -154,9 +154,11 @@ func eventToVEvent(ev proton.Event, masterTZ string, used map[string]bool) (*ica
 		}
 	}
 
-	if ev.Title != "" {
-		vevent.Props.SetText(ical.PropSummary, ev.Title)
-	}
+	// Always emit a non-empty SUMMARY: an absent (or empty) SUMMARY makes Apple
+	// Calendar render its own "untitled" placeholder. If the root-cause decrypt
+	// ever leaves Title empty (e.g. a still-unreadable card), fall back to a
+	// visible label rather than a blank event.
+	vevent.Props.SetText(ical.PropSummary, titleOrDefault(ev.Title))
 	if ev.Description != "" {
 		vevent.Props.SetText(ical.PropDescription, ev.Description)
 	}

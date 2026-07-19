@@ -125,7 +125,7 @@ func TestSealCardsAttendeesSharedSessionKey(t *testing.T) {
 		Type: papi.CalendarEventTypeEncrypted | papi.CalendarEventTypeSigned,
 		Data: att.Data,
 	}
-	plain, err := cardPlaintext(part, body.SharedKeyPacket, calKR)
+	plain, err := (&Account{}).cardPlaintext(part, body.SharedKeyPacket, calKR)
 	if err != nil {
 		t.Fatalf("attendees card does not open with SharedKeyPacket: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestSealCardsAttendeesSharedSessionKey(t *testing.T) {
 	}
 	// And the SharedEncrypted card opens with the SAME key packet.
 	shEnc := body.SharedEventContent[1]
-	if _, err := cardPlaintext(papi.CalendarEventPart{
+	if _, err := (&Account{}).cardPlaintext(papi.CalendarEventPart{
 		Type: papi.CalendarEventTypeEncrypted | papi.CalendarEventTypeSigned,
 		Data: shEnc.Data,
 	}, body.SharedKeyPacket, calKR); err != nil {
@@ -213,7 +213,7 @@ func TestDecryptEventAttendees(t *testing.T) {
 			{Token: tokSeb, Status: papi.CalendarAttendeeStatusNo}, // 2 = DECLINED
 		},
 	}
-	ev := decryptEvent(raw, calKR)
+	ev := (&Account{}).decryptEvent(raw, "", calKR)
 	if ev.DecryptFailed {
 		t.Fatal("decryptEvent failed on the fixture")
 	}

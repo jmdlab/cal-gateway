@@ -80,9 +80,9 @@ func InvitationICS(in proton.EventInput, method string, sequence int, now time.T
 		// makes the event be removed from the invitee's calendar.
 		vevent.Props.SetText(ical.PropStatus, "CANCELLED")
 	}
-	if in.Title != "" {
-		vevent.Props.SetText(ical.PropSummary, in.Title)
-	}
+	// Non-empty SUMMARY always: an empty/absent one shows as "untitled" in the
+	// recipient's calendar (belt-and-suspenders behind the decrypt fix).
+	vevent.Props.SetText(ical.PropSummary, titleOrDefault(in.Title))
 	if in.Location != "" {
 		vevent.Props.SetText(ical.PropLocation, in.Location)
 	}

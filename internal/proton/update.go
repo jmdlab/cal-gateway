@@ -64,7 +64,7 @@ func (a *Account) UpdateEvent(ctx context.Context, calID, eventID string, in Eve
 	}
 
 	// Never start from a partially decrypted event (account.go rule).
-	cur := decryptEvent(row.CalendarEvent, calKR)
+	cur := a.decryptEvent(row.CalendarEvent, row.AddressKeyPacket, calKR)
 	if cur.DecryptFailed {
 		return fmt.Errorf("proton: updating event %s/%s: %w", calID, eventID, ErrEventDegraded)
 	}
@@ -102,7 +102,7 @@ func (a *Account) UpdateEvent(ctx context.Context, calID, eventID string, in Eve
 		}
 	}
 
-	body, err := buildUpdateBody(row, &cur, in, calKR, signerKR, plan)
+	body, err := a.buildUpdateBody(row, &cur, in, calKR, signerKR, plan)
 	if err != nil {
 		return fmt.Errorf("proton: updating event %s/%s: %w", calID, eventID, err)
 	}
@@ -171,6 +171,16 @@ type eventRow struct {
 	papi.CalendarEvent
 	Notifications json.RawMessage `json:"Notifications"`
 	Color         json.RawMessage `json:"Color"`
+	// AddressKeyPacket / AddressID: the shared session key of a Proton-to-Proton
+	// invited event is wrapped to the ATTENDEE's ADDRESS key here, NOT to the
+	// calendar key in SharedKeyPacket (go-proton-api's CalendarEvent omits both
+	// fields, so they are only visible on this raw row). The organizer's client
+	// can only address the invitee's address key; the shared/attendees cards
+	// (SUMMARY lives there) are keyed by it. Without this, an invited event's
+	// title fails to decrypt and the event shows "untitled" downstream.
+	// Mirrors WebClients readSessionKeys(): prefer AddressKeyPacket over Shared.
+	AddressKeyPacket string `json:"AddressKeyPacket"`
+	AddressID        string `json:"AddressID"`
 	// RecurrenceID != 0 identifies an exception row (modified occurrence of a
 	// series, separate same-UID row); 0 = master or standalone event.
 	RecurrenceID int64 `json:"RecurrenceID"`
@@ -273,7 +283,7 @@ func (a *Account) planAttendeeUpdate(ctx context.Context, row *eventRow, cur *Ev
 			// re-sealing would lose identities — honest refusal.
 			return nil, fmt.Errorf("event has %d attendees cards, expected 1: %w", len(row.AttendeesEvents), ErrEventDegraded)
 		}
-		plain, err := cardPlaintext(row.AttendeesEvents[0], row.SharedKeyPacket, calKR)
+		plain, err := a.cardPlaintext(row.AttendeesEvents[0], row.SharedKeyPacket, calKR)
 		if err != nil {
 			return nil, fmt.Errorf("decrypting attendees card for diff (%v): %w", err, ErrEventDegraded)
 		}
@@ -310,7 +320,7 @@ func (a *Account) planAttendeeUpdate(ctx context.Context, row *eventRow, cur *Ev
 // kept verbatim. Reuses the event's session keys; the body carries no key
 // packet. A non-nil plan (M5b) rewrites the attendees card / the cleartext
 // array / ORGANIZER and bumps SEQUENCE.
-func buildUpdateBody(row *eventRow, cur *Event, in EventInput, calKR, signerKR *crypto.KeyRing, plan *attendeePlan) (*eventBody, error) {
+func (a *Account) buildUpdateBody(row *eventRow, cur *Event, in EventInput, calKR, signerKR *crypto.KeyRing, plan *attendeePlan) (*eventBody, error) {
 	// ORIGINAL session keys. Some events (created by the web client) have no
 	// encrypted calendar card, hence no CalendarKeyPacket.
 	var sharedSK, calSK *crypto.SessionKey
@@ -348,11 +358,11 @@ func buildUpdateBody(row *eventRow, cur *Event, in EventInput, calKR, signerKR *
 		}
 	}
 
-	sharedParts, err := resealParts(row.SharedEvents, row.SharedKeyPacket, sharedSK, calKR, signerKR, signedPatch, encPatch)
+	sharedParts, err := a.resealParts(row.SharedEvents, row.SharedKeyPacket, sharedSK, calKR, signerKR, signedPatch, encPatch)
 	if err != nil {
 		return nil, fmt.Errorf("resealing shared card: %w", err)
 	}
-	calParts, err := resealParts(row.CalendarEvents, row.CalendarKeyPacket, calSK, calKR, signerKR, calPatch, cardPatch{})
+	calParts, err := a.resealParts(row.CalendarEvents, row.CalendarKeyPacket, calSK, calKR, signerKR, calPatch, cardPatch{})
 	if err != nil {
 		return nil, fmt.Errorf("resealing calendar card: %w", err)
 	}
@@ -390,7 +400,7 @@ func buildUpdateBody(row *eventRow, cur *Event, in EventInput, calKR, signerKR *
 			attParts = []eventPart{{Type: cardEncryptedAndSigned, Data: data, Signature: sig}}
 		}
 	} else {
-		attParts, err = resealParts(row.AttendeesEvents, row.SharedKeyPacket, sharedSK, calKR, signerKR, cardPatch{}, cardPatch{})
+		attParts, err = a.resealParts(row.AttendeesEvents, row.SharedKeyPacket, sharedSK, calKR, signerKR, cardPatch{}, cardPatch{})
 		if err != nil {
 			return nil, fmt.Errorf("resealing attendees card: %w", err)
 		}
@@ -505,7 +515,7 @@ func sessionKeyFromPacket(keyPacketB64 string, calKR *crypto.KeyRing) (*crypto.S
 // re-encrypts the encrypted cards (with the ORIGINAL session key), applying
 // signedPatch/encPatch respectively. Card order preserved; a card of an unknown
 // type passes verbatim.
-func resealParts(parts []papi.CalendarEventPart, keyPacketB64 string, sk *crypto.SessionKey, calKR, signerKR *crypto.KeyRing, signedPatch, encPatch cardPatch) ([]eventPart, error) {
+func (a *Account) resealParts(parts []papi.CalendarEventPart, keyPacketB64 string, sk *crypto.SessionKey, calKR, signerKR *crypto.KeyRing, signedPatch, encPatch cardPatch) ([]eventPart, error) {
 	out := make([]eventPart, 0, len(parts))
 	for _, part := range parts {
 		switch {
@@ -524,7 +534,7 @@ func resealParts(parts []papi.CalendarEventPart, keyPacketB64 string, sk *crypto
 			if sk == nil {
 				return nil, fmt.Errorf("encrypted card without a recoverable session key: %w", ErrEventDegraded)
 			}
-			plain, err := cardPlaintext(part, keyPacketB64, calKR)
+			plain, err := a.cardPlaintext(part, keyPacketB64, calKR)
 			if err != nil {
 				return nil, fmt.Errorf("decrypting card for reseal (%v): %w", err, ErrEventDegraded)
 			}

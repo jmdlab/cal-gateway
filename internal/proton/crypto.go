@@ -147,7 +147,7 @@ func (a *Account) decryptPassphrase(calendarID, memberID string, pass papi.Calen
 // decryptEvent turns an API row into a decrypted Event. Never an error:
 // the row's cleartext fields (UID, bounds, timezone, all-day) are always
 // served, unreadable cards set DecryptFailed.
-func decryptEvent(raw papi.CalendarEvent, calKR *crypto.KeyRing) Event {
+func (a *Account) decryptEvent(raw papi.CalendarEvent, addrKeyPacket string, calKR *crypto.KeyRing) Event {
 	ev := Event{
 		ID:         raw.ID,
 		UID:        raw.UID,
@@ -163,9 +163,16 @@ func decryptEvent(raw papi.CalendarEvent, calKR *crypto.KeyRing) Event {
 	// calendar cards (STATUS/TRANSP), then the attendees card (M5a) —
 	// encrypted with the SAME session key as the shared cards, so the
 	// key packet is SharedKeyPacket.
-	mergeCards(&ev, raw.SharedEvents, raw.SharedKeyPacket, calKR)
-	mergeCards(&ev, raw.CalendarEvents, raw.CalendarKeyPacket, calKR)
-	mergeCards(&ev, raw.AttendeesEvents, raw.SharedKeyPacket, calKR)
+	// Prefer AddressKeyPacket over SharedKeyPacket for the shared+attendees cards
+	// (mirrors WebClients deserialize.readSessionKeys): a Proton-to-Proton invite
+	// wraps the shared session key to our address key, not the calendar key.
+	sharedKP := raw.SharedKeyPacket
+	if addrKeyPacket != "" {
+		sharedKP = addrKeyPacket
+	}
+	a.mergeCards(&ev, raw.SharedEvents, sharedKP, calKR)
+	a.mergeCards(&ev, raw.CalendarEvents, raw.CalendarKeyPacket, calKR)
+	a.mergeCards(&ev, raw.AttendeesEvents, sharedKP, calKR)
 	// RSVP status: CLEARTEXT column of the row (Attendees array), joined
 	// to the decrypted identities by Token (0=NEEDS-ACTION, 1=TENTATIVE,
 	// 2=DECLINED, 3=ACCEPTED). A token without a cleartext entry stays 0.
@@ -190,9 +197,9 @@ func decryptEvent(raw papi.CalendarEvent, calKR *crypto.KeyRing) Event {
 
 // mergeCards decrypts/parses a list of cards and merges their properties
 // into the event. keyPacketB64 is the key packet shared by these cards.
-func mergeCards(ev *Event, parts []papi.CalendarEventPart, keyPacketB64 string, calKR *crypto.KeyRing) {
+func (a *Account) mergeCards(ev *Event, parts []papi.CalendarEventPart, keyPacketB64 string, calKR *crypto.KeyRing) {
 	for _, part := range parts {
-		data, err := cardPlaintext(part, keyPacketB64, calKR)
+		data, err := a.cardPlaintext(part, keyPacketB64, calKR)
 		if err != nil {
 			ev.DecryptFailed = true
 			continue
@@ -281,20 +288,21 @@ func appendExDates(dst, src []time.Time) []time.Time {
 // Note: go-proton-api provides CalendarEventPart.Decode, but its
 // value receiver loses the decrypted data and it requires signature
 // verification; so we decrypt ourselves with gopenpgp.
-func cardPlaintext(part papi.CalendarEventPart, keyPacketB64 string, calKR *crypto.KeyRing) (string, error) {
+func (a *Account) cardPlaintext(part papi.CalendarEventPart, keyPacketB64 string, calKR *crypto.KeyRing) (string, error) {
 	if part.Type&papi.CalendarEventTypeEncrypted == 0 {
 		// Clear or signed: the data is already the iCalendar fragment.
 		return part.Data, nil
-	}
-	if calKR == nil {
-		return "", errors.New("proton: no calendar key ring")
 	}
 
 	dataPacket, err := base64.StdEncoding.DecodeString(part.Data)
 	if err != nil {
 		// Without a key packet, the data is a complete armored PGP message.
 		if keyPacketB64 == "" {
-			return decryptArmoredCard(part.Data, calKR)
+			msg, perr := crypto.NewPGPMessageFromArmored(part.Data)
+			if perr != nil {
+				return "", fmt.Errorf("proton: parsing armored card: %w", perr)
+			}
+			return a.decryptCardMessage(msg, calKR)
 		}
 		return "", fmt.Errorf("proton: decoding data packet: %w", err)
 	}
@@ -307,28 +315,38 @@ func cardPlaintext(part papi.CalendarEventPart, keyPacketB64 string, calKR *cryp
 		if err != nil {
 			return "", fmt.Errorf("proton: decoding key packet: %w", err)
 		}
-		// key packet (PKESK, session key encrypted to the calendar key)
-		// + data packet (SEIPD) = complete PGP message.
+		// key packet (PKESK, session key encrypted to the calendar OR address
+		// key) + data packet (SEIPD) = complete PGP message.
 		msg = crypto.NewPGPSplitMessage(keyPacket, dataPacket).GetPGPMessage()
 	}
-
-	plain, err := calKR.Decrypt(msg, nil, 0)
-	if err != nil {
-		return "", fmt.Errorf("proton: decrypting event card: %w", err)
-	}
-	// GetBinary and not GetString: the CRLF->LF normalization would corrupt the
-	// iCalendar fragment (the line endings are part of the format).
-	return string(plain.GetBinary()), nil
+	return a.decryptCardMessage(msg, calKR)
 }
 
-func decryptArmoredCard(armored string, calKR *crypto.KeyRing) (string, error) {
-	msg, err := crypto.NewPGPMessageFromArmored(armored)
-	if err != nil {
-		return "", fmt.Errorf("proton: parsing armored card: %w", err)
+// decryptCardMessage decrypts an event-card PGP message trying the calendar
+// keyring first, then EACH address keyring (same lenient, verify-free, try-all
+// approach as decryptPassphrase). The fallback is what unlocks a Proton-to-Proton
+// invited event whose shared session key is wrapped to an address key rather
+// than the calendar key — without it the SUMMARY card fails and the event is
+// served untitled.
+func (a *Account) decryptCardMessage(msg *crypto.PGPMessage, calKR *crypto.KeyRing) (string, error) {
+	if calKR != nil {
+		if plain, err := calKR.Decrypt(msg, nil, 0); err == nil {
+			// GetBinary and not GetString: the CRLF->LF normalization would corrupt
+			// the iCalendar fragment (line endings are part of the format).
+			return string(plain.GetBinary()), nil
+		}
 	}
-	plain, err := calKR.Decrypt(msg, nil, 0)
-	if err != nil {
-		return "", fmt.Errorf("proton: decrypting armored card: %w", err)
+	for _, addr := range a.addresses {
+		kr, ok := a.addrKRs[addr.ID]
+		if !ok {
+			continue
+		}
+		if plain, err := kr.Decrypt(msg, nil, 0); err == nil {
+			return string(plain.GetBinary()), nil
+		}
 	}
-	return string(plain.GetBinary()), nil
+	if calKR == nil {
+		return "", errors.New("proton: no key ring could decrypt the card")
+	}
+	return "", errors.New("proton: decrypting event card: no calendar or address key matched")
 }

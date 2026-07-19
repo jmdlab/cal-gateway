@@ -96,7 +96,7 @@ func TestLiveAttendeesCardRoundTrip(t *testing.T) {
 		t.Fatalf("calendarKeyRing: %v", err)
 	}
 	// THE shared-session-key proof: the card opens with SharedKeyPacket.
-	plain, err := cardPlaintext(attPart, row.SharedKeyPacket, calKR)
+	plain, err := (&Account{}).cardPlaintext(attPart, row.SharedKeyPacket, calKR)
 	if err != nil {
 		t.Fatalf("attendees card unreadable with SharedKeyPacket: %v", err)
 	}

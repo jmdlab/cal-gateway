@@ -221,7 +221,7 @@ func TestUpdateResealRoundTrip(t *testing.T) {
 			{Type: papi.CalendarEventTypeEncrypted | papi.CalendarEventTypeSigned, Data: data},
 		},
 	}}
-	cur := decryptEvent(row.CalendarEvent, calKR)
+	cur := (&Account{}).decryptEvent(row.CalendarEvent, "", calKR)
 	if cur.DecryptFailed {
 		t.Fatal("fixture must decrypt cleanly")
 	}
@@ -234,7 +234,7 @@ func TestUpdateResealRoundTrip(t *testing.T) {
 		RRule:   cur.RRule,
 		ExDates: []time.Time{ex},
 	}
-	body, err := buildUpdateBody(row, &cur, in, calKR, signerKR, nil)
+	body, err := (&Account{}).buildUpdateBody(row, &cur, in, calKR, signerKR, nil)
 	if err != nil {
 		t.Fatalf("buildUpdateBody: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestUpdateResealRoundTrip(t *testing.T) {
 	// (1) Encrypted card: re-decrypts with the ORIGINAL key packet.
 	newEnc := body.SharedEventContent[1]
 	part := papi.CalendarEventPart{Type: papi.CalendarEventType(newEnc.Type), Data: newEnc.Data}
-	plain, err := cardPlaintext(part, kp, calKR)
+	plain, err := (&Account{}).cardPlaintext(part, kp, calKR)
 	if err != nil {
 		t.Fatalf("re-encrypted card does not open with the ORIGINAL key packet: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestUpdateBodyStatusAndNotifications(t *testing.T) {
 		},
 		Notifications: json.RawMessage("null"),
 	}
-	cur := decryptEvent(row.CalendarEvent, calKR)
+	cur := (&Account{}).decryptEvent(row.CalendarEvent, "", calKR)
 	if cur.Status != "CONFIRMED" || cur.Transp != "OPAQUE" {
 		t.Fatalf("fixture status/transp = %q/%q", cur.Status, cur.Transp)
 	}
@@ -345,7 +345,7 @@ func TestUpdateBodyStatusAndNotifications(t *testing.T) {
 		Status: "CANCELLED", Transp: "TRANSPARENT",
 		Notifications: []Notification{{Type: NotificationDevice, Trigger: "-PT15M"}},
 	}
-	body, err := buildUpdateBody(row, &cur, in, calKR, signerKR, nil)
+	body, err := (&Account{}).buildUpdateBody(row, &cur, in, calKR, signerKR, nil)
 	if err != nil {
 		t.Fatalf("buildUpdateBody: %v", err)
 	}
@@ -372,7 +372,7 @@ func TestUpdateBodyStatusAndNotifications(t *testing.T) {
 
 	// Without an alarm or status change: original column and card verbatim.
 	same := EventInput{Start: cur.Start, End: cur.End, Status: "CONFIRMED", Transp: "OPAQUE"}
-	body2, err := buildUpdateBody(row, &cur, same, calKR, signerKR, nil)
+	body2, err := (&Account{}).buildUpdateBody(row, &cur, same, calKR, signerKR, nil)
 	if err != nil {
 		t.Fatalf("buildUpdateBody(same): %v", err)
 	}
@@ -405,10 +405,10 @@ func TestUpdateBodySynthesizesCalendarCard(t *testing.T) {
 			{Type: papi.CalendarEventTypeSigned, Data: sharedCard},
 		},
 	}}
-	cur := decryptEvent(row.CalendarEvent, calKR)
+	cur := (&Account{}).decryptEvent(row.CalendarEvent, "", calKR)
 
 	in := EventInput{Start: cur.Start, End: cur.End, Status: "CANCELLED"}
-	body, err := buildUpdateBody(row, &cur, in, calKR, signerKR, nil)
+	body, err := (&Account{}).buildUpdateBody(row, &cur, in, calKR, signerKR, nil)
 	if err != nil {
 		t.Fatalf("buildUpdateBody: %v", err)
 	}
@@ -433,7 +433,7 @@ func TestUpdateBodySynthesizesCalendarCard(t *testing.T) {
 	}
 
 	// Without a status change: nothing is synthesized.
-	body2, err := buildUpdateBody(row, &cur, EventInput{Start: cur.Start, End: cur.End}, calKR, signerKR, nil)
+	body2, err := (&Account{}).buildUpdateBody(row, &cur, EventInput{Start: cur.Start, End: cur.End}, calKR, signerKR, nil)
 	if err != nil {
 		t.Fatalf("buildUpdateBody(same): %v", err)
 	}
@@ -461,7 +461,7 @@ func TestUpdateRefusesDegraded(t *testing.T) {
 		},
 	}}
 	cur := Event{UID: "u", Start: time.Unix(0, 0), End: time.Unix(3600, 0)}
-	_, err = buildUpdateBody(row, &cur, EventInput{Start: cur.Start, End: cur.End}, calKR, signerKR, nil)
+	_, err = (&Account{}).buildUpdateBody(row, &cur, EventInput{Start: cur.Start, End: cur.End}, calKR, signerKR, nil)
 	if !errors.Is(err, ErrEventDegraded) {
 		t.Fatalf("err = %v, want ErrEventDegraded", err)
 	}
@@ -554,7 +554,7 @@ func TestUpdatePreservesAttendeesCard(t *testing.T) {
 		},
 		Attendees: []papi.CalendarAttendee{{Token: tok, Status: papi.CalendarAttendeeStatusYes}},
 	}}
-	cur := decryptEvent(row.CalendarEvent, calKR)
+	cur := (&Account{}).decryptEvent(row.CalendarEvent, "", calKR)
 	if cur.DecryptFailed {
 		t.Fatal("fixture must decrypt cleanly")
 	}
@@ -564,7 +564,7 @@ func TestUpdatePreservesAttendeesCard(t *testing.T) {
 		Title: "Lunch (moved)",
 		Start: cur.Start, End: cur.End,
 	}
-	body, err := buildUpdateBody(row, &cur, in, calKR, signerKR, nil)
+	body, err := (&Account{}).buildUpdateBody(row, &cur, in, calKR, signerKR, nil)
 	if err != nil {
 		t.Fatalf("buildUpdateBody: %v", err)
 	}
@@ -575,7 +575,7 @@ func TestUpdatePreservesAttendeesCard(t *testing.T) {
 		t.Fatalf("AttendeesEventContent = %d cards, want 1", len(body.AttendeesEventContent))
 	}
 	att := body.AttendeesEventContent[0]
-	plain, err := cardPlaintext(papi.CalendarEventPart{
+	plain, err := (&Account{}).cardPlaintext(papi.CalendarEventPart{
 		Type: papi.CalendarEventType(att.Type), Data: att.Data,
 	}, sealed.SharedKeyPacket, calKR)
 	if err != nil {
