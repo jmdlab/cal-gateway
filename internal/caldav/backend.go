@@ -342,7 +342,29 @@ func (b *Backend) CreateCalendar(ctx context.Context, calendar *webcaldav.Calend
 //
 // Stale If-Match → 412 (RFC 7232): the client re-syncs and replays, instead of
 // overwriting a state it never saw (the "Error 2" banner seen in prod).
-func (b *Backend) PutCalendarObject(ctx context.Context, urlPath string, calendar *ical.Calendar, opts *webcaldav.PutCalendarObjectOptions) (*webcaldav.CalendarObject, error) {
+func (b *Backend) PutCalendarObject(ctx context.Context, urlPath string, calendar *ical.Calendar, opts *webcaldav.PutCalendarObjectOptions) (co *webcaldav.CalendarObject, err error) {
+	// Observability for the "it deletes, then comes back" class of report. Every
+	// refusal here is an honest 403 by design, but CalDAV clients surface it as a
+	// silent revert: the user sees the occurrence vanish (optimistic UI) and
+	// reappear on the next sync, with nothing anywhere to say why. At the default
+	// verbosity NOTHING was logged, so the only way to diagnose was
+	// CALGW_HTTPDEBUG, which dumps calendar contents in clear. One line per
+	// refused write closes that gap: the reason tags (ATTENDEE-RECURRING,
+	// ATTENDEE-FOREIGN, THISANDFUTURE…) are enough to explain the revert, and no
+	// event content is written — the ICS body never reaches this log.
+	// (go-webdav wraps the status code in an internal type we cannot assert on,
+	// but every gatekeeping refusal wraps errICalRefused — including the
+	// ATTENDEE-* ones — so errors.Is identifies them exactly.)
+	defer func() {
+		switch {
+		case err == nil:
+		case errors.Is(err, errICalRefused):
+			log.Printf("cal-gateway: PUT REFUSÉ (403) %s — %v", urlPath, err)
+		default:
+			log.Printf("cal-gateway: PUT en échec %s — %v", urlPath, err)
+		}
+	}()
+
 	calID, resName, err := b.parsePath(urlPath)
 	if err != nil {
 		return nil, err
