@@ -507,6 +507,28 @@ func (b *Backend) decideInvitePolicy(ctx context.Context, calID string, series s
 		switch {
 		case !putAtts && !rowAtts:
 			// No invitee in the PUT nor on the Proton side: nothing to decide.
+		case masterRow != nil && isOccurrenceDeletionOnly(*series.master, *masterRow):
+			// DELETE MEANS DELETE (decision JM, 2026-07-30). Deleting a single
+			// occurrence used to be refused on an invited series — ATTENDEE-FOREIGN
+			// if a third party organises it, ATTENDEE-RECURRING once the series had
+			// exceptions — because no per-occurrence CANCEL is emitted. But a CalDAV
+			// client shows that 403 as a silent revert: the occurrence vanishes, then
+			// comes back a second later. Matching the iOS Calendar contract (delete
+			// removes it) beats a refusal nobody can see.
+			//
+			// Deliberately NARROW: isOccurrenceDeletionOnly only passes when the PUT
+			// is byte-for-byte the stored event plus extra EXDATEs — same bounds,
+			// same RRULE, same texts, same STATUS/TRANSP, no RECURRENCE-ID child, and
+			// every previously stored EXDATE preserved. Any other change on a
+			// third-party event still hits ATTENDEE-FOREIGN below, so the "never
+			// rewrite someone else's event" rule stands.
+			//
+			// Empty body = fall through to the normal write with no invite action:
+			// the EXDATE lands in Proton, the attendees are NOT notified of that one
+			// cancelled occurrence, and on a series organised by someone else the
+			// organiser's next update may legitimately restore it.
+			log.Printf("cal-gateway: suppression d'occurrence sur série invitée — EXDATE appliqué sans CANCEL par occurrence (%d → %d EXDATE)",
+				len(masterRow.ExDates), len(series.master.ExDates))
 		case b.inviteSender == nil:
 			return false, nil, nil, false, webdav.NewHTTPError(http.StatusForbidden,
 				fmt.Errorf("%w: outgoing invitations (ATTENDEE) are disabled — enable the [invite] config section", errICalRefused))
@@ -1360,4 +1382,43 @@ func timeRange(f webcaldav.CompFilter) (start, end time.Time, ok bool) {
 		}
 	}
 	return time.Time{}, time.Time{}, false
+}
+
+// isOccurrenceDeletionOnly reports whether a PUT differs from the stored row
+// ONLY by additional EXDATEs — the exact signature of "delete this occurrence"
+// and nothing else. Used to let that one operation through on an invited series
+// (see the switch in the PUT path) without loosening anything else: a single
+// difference in bounds, recurrence, texts or status makes it false, so a genuine
+// edit of a third party's event is still refused.
+func isOccurrenceDeletionOnly(in proton.EventInput, row proton.Event) bool {
+	// Recurring, and the recurrence itself untouched (a truncated RRULE is
+	// "delete this and following", a different operation).
+	if in.RRule == "" || in.RRule != row.RRule {
+		return false
+	}
+	if !in.Start.Equal(row.Start) || !in.End.Equal(row.End) || in.AllDay != row.AllDay {
+		return false
+	}
+	if in.Title != row.Title || in.Description != row.Description || in.Location != row.Location {
+		return false
+	}
+	if defaulted(in.Status, "CONFIRMED") != defaulted(row.Status, "CONFIRMED") ||
+		defaulted(in.Transp, "OPAQUE") != defaulted(row.Transp, "OPAQUE") {
+		return false
+	}
+	// Strictly MORE exclusions than stored, and every stored one preserved —
+	// additions only. Un-deleting (fewer EXDATEs) is not this operation.
+	if len(in.ExDates) <= len(row.ExDates) {
+		return false
+	}
+	incoming := make(map[int64]bool, len(in.ExDates))
+	for _, t := range in.ExDates {
+		incoming[t.UTC().Unix()] = true
+	}
+	for _, t := range row.ExDates {
+		if !incoming[t.UTC().Unix()] {
+			return false
+		}
+	}
+	return true
 }
