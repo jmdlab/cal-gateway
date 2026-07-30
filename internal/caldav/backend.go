@@ -408,7 +408,19 @@ func (b *Backend) PutCalendarObject(ctx context.Context, urlPath string, calenda
 		}
 	}
 
-	if err := b.checkPreconditions(opts, rows); err != nil {
+	// The ETag the client HOLDS is the one we served, and the read path serves the
+	// STORE (ListEventsByUID) while `rows` above is the AUTHORITATIVE Proton state.
+	// When the two drift, the client's If-Match can never equal the authoritative
+	// hash: every conditional PUT 412s forever, the client reverts, and the user
+	// watches the occurrence reappear each time (Anne, 2026-07-30 — the served ETag
+	// was byte-for-byte what she sent, and the write path still called it stale).
+	// The client did nothing wrong; it echoed our own ETag. So accept either, and
+	// log the drift, which is the real defect to chase.
+	servedRows, srvErr := b.src.ListEventsByUID(ctx, calID, series.uid)
+	if srvErr != nil {
+		servedRows = nil // no served view available → authoritative only
+	}
+	if err := b.checkPreconditions(opts, rows, servedRows); err != nil {
 		return nil, err
 	}
 
@@ -437,7 +449,11 @@ func (b *Backend) PutCalendarObject(ctx context.Context, urlPath string, calenda
 // saw and then detecting the inconsistency (the "Error 2" banner seen in prod
 // on 2026-07-16 on exactly this scenario). Returns nil when the preconditions
 // pass.
-func (b *Backend) checkPreconditions(opts *webcaldav.PutCalendarObjectOptions, rows []proton.Event) error {
+// `rows` is the authoritative Proton state; `served` is the store view the read
+// path actually hands to clients (may be nil when unavailable). An If-Match
+// matching EITHER is honoured — see the call site for why refusing the served one
+// deadlocks the client permanently.
+func (b *Backend) checkPreconditions(opts *webcaldav.PutCalendarObjectOptions, rows, served []proton.Event) error {
 	if opts != nil && opts.IfMatch.IsSet() && !opts.IfMatch.IsWildcard() {
 		want, err := opts.IfMatch.ETag()
 		if err != nil {
@@ -447,9 +463,20 @@ func (b *Backend) checkPreconditions(opts *webcaldav.PutCalendarObjectOptions, r
 			return webdav.NewHTTPError(http.StatusPreconditionFailed,
 				errors.New("caldav: If-Match on a resource that no longer exists"))
 		}
-		if cur := groupETag(sortSeriesRows(rows)); want != cur {
-			return webdav.NewHTTPError(http.StatusPreconditionFailed,
-				fmt.Errorf("caldav: If-Match %q stale (current %q)", want, cur))
+		cur := groupETag(sortSeriesRows(rows))
+		if want != cur {
+			servedETag := ""
+			if len(served) > 0 {
+				servedETag = groupETag(sortSeriesRows(served))
+			}
+			if servedETag == "" || want != servedETag {
+				return webdav.NewHTTPError(http.StatusPreconditionFailed,
+					fmt.Errorf("caldav: If-Match %q stale (current %q, served %q)", want, cur, servedETag))
+			}
+			// The client is echoing the ETag we served: honour it, and surface the
+			// cache/Proton drift that made the two disagree.
+			log.Printf("cal-gateway: DÉRIVE DE CACHE — If-Match %q accepté (état servi) alors que l'autoritatif est %q ; le store a divergé de Proton pour cet UID",
+				want, cur)
 		}
 	}
 	// If-None-Match: * = strict creation — refuse if the resource already exists.
