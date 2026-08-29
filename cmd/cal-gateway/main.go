@@ -27,6 +27,9 @@ import (
 	"github.com/jmdlab/cal-gateway/internal/server"
 	"github.com/jmdlab/cal-gateway/internal/store"
 	calsync "github.com/jmdlab/cal-gateway/internal/sync"
+	"net"
+	"net/http"
+	"time"
 )
 
 const usage = `cal-gateway — Proton Calendar ↔ CalDAV gateway
@@ -235,10 +238,7 @@ func runServe(configPath string) error {
 	}
 	defer lock.Close() // also releases the flock
 
-	account, err := proton.RestoreAccount(ctx, cfg.DataDir)
-	if errors.Is(err, proton.ErrNoSession) {
-		return fmt.Errorf("%w — run `cal-gateway login -config %s` first", err, configPath)
-	}
+	account, err := restoreAccountWithRetry(ctx, cfg.DataDir, cfg.ListenAddr, configPath)
 	if err != nil {
 		return err
 	}
@@ -339,6 +339,118 @@ func runServe(configPath string) error {
 		return err
 	}
 	return srv.Run(ctx)
+}
+
+// restoreAccountWithRetry keeps the daemon ALIVE while Proton is unreachable at
+// boot. Until 2026-08-29 a 5xx from mail.proton.me on the very first request
+// made `serve` exit 1: systemd restarted it every 10-60 s for the whole outage
+// (83 failures logged during the Proton incident of 2026-08-26, one OnFailure
+// e-mail per attempt, a "failed unit" alert for a problem on Proton's side) and
+// the CalDAV clients saw connection refused instead of a clean 503.
+//
+// Now the FIRST failure opens a bootstrap listener on listenAddr — /healthz
+// answers 200 "starting" (same contract as the readiness gate, the watchdog
+// keeps quiet), everything else 503 + Retry-After — and RestoreAccount is
+// retried with exponential backoff (10 s → 5 min) until Proton answers or the
+// process is stopped. Errors that can NEVER self-heal (no session, session
+// invalid/revoked) still return immediately: exit 78 stays the operator's
+// signal.
+func restoreAccountWithRetry(ctx context.Context, dataDir, listenAddr, configPath string) (*proton.Account, error) {
+	var (
+		boot    *http.Server
+		status  atomic.Value // string shown on /healthz
+		attempt int
+	)
+	stopBoot := func() {
+		if boot == nil {
+			return
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = boot.Shutdown(shutdownCtx)
+		boot = nil
+	}
+	defer stopBoot()
+
+	for {
+		attempt++
+		account, err := proton.RestoreAccount(ctx, dataDir)
+		if err == nil {
+			if attempt > 1 {
+				log.Printf("proton reachable again after %d attempt(s) — handing the port over to the CalDAV server", attempt)
+			}
+			stopBoot()
+			return account, nil
+		}
+		if errors.Is(err, proton.ErrNoSession) {
+			return nil, fmt.Errorf("%w — run `cal-gateway login -config %s` first", err, configPath)
+		}
+		if errors.Is(err, proton.ErrSessionInvalid) || ctx.Err() != nil {
+			return nil, err
+		}
+		delay := retryDelay(attempt)
+		msg := fmt.Sprintf("starting: waiting for Proton (attempt %d failed: %v — next try in %s)", attempt, err, delay)
+		status.Store(msg)
+		log.Printf("proton unreachable at boot: %v — retrying in %s (attempt %d); port held with 503 meanwhile", err, delay, attempt)
+		if boot == nil {
+			boot = &http.Server{
+				Addr:              listenAddr,
+				Handler:           bootstrapHandler(func() string { s, _ := status.Load().(string); return s }),
+				ReadHeaderTimeout: 10 * time.Second,
+			}
+			go func(srv *http.Server) {
+				if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					log.Printf("bootstrap listener on %s: %v (the CalDAV server will bind later anyway)", listenAddr, err)
+				}
+			}(boot)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("serve: interrupted while waiting for Proton: %w", ctx.Err())
+		case <-time.After(delay):
+		}
+	}
+}
+
+// retryDelay is the boot backoff: 10 s, 20 s, 40 s, … capped at 5 min. A
+// Proton outage lasts minutes to hours; hammering the API every 10 s for hours
+// would only earn a 429 — five minutes keeps the recovery latency acceptable
+// (the poller then runs every poll_interval anyway).
+func retryDelay(attempt int) time.Duration {
+	const base, max = 10 * time.Second, 5 * time.Minute
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := base
+	for i := 1; i < attempt && d < max; i++ {
+		d *= 2
+	}
+	if d > max {
+		d = max
+	}
+	return d
+}
+
+// bootstrapHandler is what the port answers while Proton is unreachable at
+// boot: /healthz (loopback only, like the real one) → 200 "starting…" so the
+// watchdog does not restart a daemon that is doing the right thing; anything
+// else → 503 + Retry-After, the same signal the readiness gate sends during
+// the initial sync (CalDAV clients retry, they never see connection refused).
+func bootstrapHandler(status func() string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			host, _, err := net.SplitHostPort(r.RemoteAddr)
+			if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			fmt.Fprintln(w, status())
+			return
+		}
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "cal-gateway is starting (waiting for Proton) — please retry", http.StatusServiceUnavailable)
+	})
 }
 
 // acquireServeLock takes a non-blocking EXCLUSIVE flock(2) on
