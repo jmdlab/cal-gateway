@@ -20,7 +20,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.7'
           check-latest: true
 
       - name: gofmt (fail on diff)
