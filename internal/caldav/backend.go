@@ -520,7 +520,18 @@ func (b *Backend) decideInvitePolicy(ctx context.Context, calID string, series s
 		// other change falls back to the 403 ATTENDEE-FOREIGN below.
 		if b.inviteSender != nil && masterRow != nil && len(masterRow.Attendees) > 0 &&
 			!b.isOwner(masterRow.Organizer) && len(series.children) == 0 && len(exceptions) == 0 {
-			if reply, ok := b.detectOwnRSVP(*series.master, *masterRow); ok {
+			reply, ok := b.detectOwnRSVP(*series.master, *masterRow)
+			if !ok {
+				// Lenient fallback (third-party organizer only): iOS/Google
+				// round-trips normalize texts/params, so the strict detector can
+				// miss a genuine Accept. Log WHICH comparisons differed (names
+				// only, never values) to keep this diagnosable.
+				var diffs []string
+				if reply, diffs, ok = b.detectOwnRSVPLenient(*series.master, *masterRow); ok && len(diffs) > 0 {
+					log.Printf("cal-gateway: rsvp lenient: %s", strings.Join(diffs, "; "))
+				}
+			}
+			if ok {
 				obj, rerr := b.handleOutgoingRSVP(ctx, calID, series.uid, masterRow, reply)
 				return false, nil, obj, true, rerr
 			}
@@ -898,17 +909,88 @@ func (b *Backend) detectOwnRSVP(in proton.EventInput, row proton.Event) (rsvpRep
 // single difference forbids the RSVP path (the third party's event must never be
 // rewritten).
 func sameEventShape(in proton.EventInput, row proton.Event) bool {
+	return len(shapeDiffs(in, row)) == 0
+}
+
+// shapeDiffs returns the NAMES (never the values) of the shape fields that
+// differ between the PUT and the stored event — same comparisons as
+// sameEventShape, used for diagnostics.
+func shapeDiffs(in proton.EventInput, row proton.Event) []string {
+	var d []string
 	if !in.Start.Equal(row.Start) || !in.End.Equal(row.End) || in.AllDay != row.AllDay {
-		return false
+		d = append(d, "bounds")
 	}
 	if in.RRule != row.RRule || !sameInstantSet(in.ExDates, row.ExDates) {
-		return false
+		d = append(d, "recurrence")
 	}
-	if in.Title != row.Title || in.Description != row.Description || in.Location != row.Location {
-		return false
+	if in.Title != row.Title {
+		d = append(d, "title")
 	}
-	return defaulted(in.Status, "CONFIRMED") == defaulted(row.Status, "CONFIRMED") &&
-		defaulted(in.Transp, "OPAQUE") == defaulted(row.Transp, "OPAQUE")
+	if in.Description != row.Description {
+		d = append(d, "description")
+	}
+	if in.Location != row.Location {
+		d = append(d, "location")
+	}
+	if defaulted(in.Status, "CONFIRMED") != defaulted(row.Status, "CONFIRMED") {
+		d = append(d, "status")
+	}
+	if defaulted(in.Transp, "OPAQUE") != defaulted(row.Transp, "OPAQUE") {
+		d = append(d, "transp")
+	}
+	return d
+}
+
+// detectOwnRSVPLenient is the fallback of detectOwnRSVP for events organized by
+// a THIRD PARTY only (the caller guarantees it): it recognizes a reply when
+// exactly one invitee's PARTSTAT changes, that invitee is an account address
+// with a patchable attendeeID, and the new status is a real reply (not
+// NEEDS-ACTION). Everything else in the PUT (texts, times, alarms, other
+// invitees' parameters, invitees unknown to the row) is IGNORED — the caller
+// only ever PATCHes the owner's status, so the third party's event is never
+// rewritten whatever the client round-tripped. Invitees are matched by email,
+// case-insensitively, tolerating a "mailto:" prefix. diffs lists the NAMES of the
+// comparisons the strict detector would have rejected (no values, no emails).
+func (b *Backend) detectOwnRSVPLenient(in proton.EventInput, row proton.Event) (reply rsvpReply, diffs []string, ok bool) {
+	diffs = shapeDiffs(in, row)
+	if len(in.Attendees) != len(row.Attendees) {
+		diffs = append(diffs, fmt.Sprintf("attendee set differs: count %d vs %d", len(in.Attendees), len(row.Attendees)))
+	} else if !sameAttendeeSet(in.Attendees, row.Attendees) {
+		diffs = append(diffs, "attendee set differs: addresses")
+	}
+	rowByEmail := make(map[string]proton.Attendee, len(row.Attendees))
+	for _, at := range row.Attendees {
+		rowByEmail[normAddr(at.Email)] = at
+	}
+	changed := 0
+	for _, at := range in.Attendees {
+		rat, found := rowByEmail[normAddr(at.Email)]
+		if !found {
+			continue
+		}
+		ns := statusFromPartstat(at.Partstat)
+		if ns == rat.Status {
+			continue
+		}
+		changed++
+		if changed > 1 || !b.isOwner(normAddr(at.Email)) || rat.ID == "" || ns == 0 {
+			return rsvpReply{}, nil, false
+		}
+		reply = rsvpReply{attendee: rat, newStatus: ns, partstat: partstatFromStatus(ns)}
+	}
+	if changed != 1 {
+		return rsvpReply{}, nil, false
+	}
+	return reply, diffs, true
+}
+
+// normAddr normalizes a calendar address for comparison: optional "mailto:"
+// prefix dropped, trimmed, lower-cased.
+func normAddr(s string) string {
+	if a := mailtoCalAddress(s); a != "" {
+		s = a
+	}
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 // defaulted applies a default value to an absent property (mirror of the RFC

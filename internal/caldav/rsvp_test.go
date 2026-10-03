@@ -265,3 +265,80 @@ func TestRSVPCannotAnswerForOthers(t *testing.T) {
 		t.Errorf("REPLY emitted wrongly for a third party (%d)", len(sender.sent))
 	}
 }
+
+// TestRSVPLenientOnForeignEvent: a Google-originated invitation answered from iOS —
+// the PUT carries the owner's new PARTSTAT but also slightly different
+// description/transp and an extra unknown invitee. The strict detector rejects it;
+// the lenient one routes it as an RSVP: owner row patched, REPLY sent, event never
+// rewritten.
+func TestRSVPLenientOnForeignEvent(t *testing.T) {
+	b, src, sender, organizer := receivedInvitationBackend(t)
+	ctx := context.Background()
+	mutate := func(v *ical.Component) {
+		v.Props.SetText(ical.PropDescription, "Normalized by the client")
+		v.Props.SetText(ical.PropTransparency, "TRANSPARENT")
+		p := ical.NewProp(ical.PropAttendee)
+		p.Params.Set(ical.ParamParticipationStatus, "ACCEPTED")
+		p.Value = "mailto:guest@example.org"
+		v.Props.Add(p)
+	}
+	obj, err := b.PutCalendarObject(ctx, "/alice/calendars/cal1/recv1.ics", receivedPUT(t, "ACCEPTED", mutate), nil)
+	if err != nil {
+		t.Fatalf("lenient RSVP refused: %v", err)
+	}
+	if obj == nil || obj.ETag == "" {
+		t.Fatalf("empty PUT response: %+v", obj)
+	}
+	if src.updated != 0 || src.created != 0 {
+		t.Errorf("third party's event rewritten (created=%d updated=%d)", src.created, src.updated)
+	}
+	ev, _ := src.GetEvent(ctx, "cal1", "recv1")
+	if len(ev.Attendees) != 1 || ev.Attendees[0].Status != 3 || ev.Description != "" {
+		t.Fatalf("stored event after RSVP = %+v", ev)
+	}
+	if len(sender.sent) != 1 || sender.sent[0].Method != invite.MethodReply || sender.sent[0].To != organizer {
+		t.Fatalf("REPLY missing or misrouted: %+v", sender.sent)
+	}
+}
+
+// TestRSVPLenientRefusals: the lenient path never widens what is accepted — an
+// unchanged owner PARTSTAT, a change on someone else's PARTSTAT, or a return to
+// NEEDS-ACTION all stay 403 ATTENDEE-FOREIGN with no REPLY and no rewrite.
+func TestRSVPLenientRefusals(t *testing.T) {
+	t.Run("title change, owner PARTSTAT unchanged", func(t *testing.T) {
+		b, src, sender, _ := receivedInvitationBackend(t)
+		mutate := func(v *ical.Component) { v.Props.SetText(ical.PropSummary, "Renamed") }
+		_, err := b.PutCalendarObject(context.Background(), "/alice/calendars/cal1/recv1.ics", receivedPUT(t, "NEEDS-ACTION", mutate), nil)
+		assertForeign403(t, err, src, sender)
+	})
+	t.Run("non-owner PARTSTAT changed", func(t *testing.T) {
+		b, src, sender, _ := receivedInvitationBackend(t)
+		src.events["cal1"][0].Attendees = append(src.events["cal1"][0].Attendees,
+			proton.Attendee{Email: "carol@example.com", Status: 0, Token: "tok-carol", ID: "att-carol"})
+		mutate := func(v *ical.Component) {
+			p := ical.NewProp(ical.PropAttendee)
+			p.Params.Set(ical.ParamParticipationStatus, "ACCEPTED")
+			p.Value = "mailto:carol@example.com"
+			v.Props.Add(p)
+		}
+		_, err := b.PutCalendarObject(context.Background(), "/alice/calendars/cal1/recv1.ics", receivedPUT(t, "NEEDS-ACTION", mutate), nil)
+		assertForeign403(t, err, src, sender)
+	})
+	t.Run("owner back to NEEDS-ACTION", func(t *testing.T) {
+		b, src, sender, _ := receivedInvitationBackend(t)
+		src.events["cal1"][0].Attendees[0].Status = 3
+		mutate := func(v *ical.Component) { v.Props.SetText(ical.PropDescription, "other") }
+		_, err := b.PutCalendarObject(context.Background(), "/alice/calendars/cal1/recv1.ics", receivedPUT(t, "NEEDS-ACTION", mutate), nil)
+		assertForeign403(t, err, src, sender)
+	})
+}
+
+func assertForeign403(t *testing.T, err error, src *fakeSource, sender *fakeSender) {
+	t.Helper()
+	if !isHTTPStatus(err, http.StatusForbidden) || !strings.Contains(err.Error(), "ATTENDEE-FOREIGN") {
+		t.Fatalf("err = %v, want 403 ATTENDEE-FOREIGN", err)
+	}
+	if len(sender.sent) != 0 || src.updated != 0 || src.created != 0 {
+		t.Errorf("side effects on a refused PUT: sent=%d updated=%d created=%d", len(sender.sent), src.updated, src.created)
+	}
+}
