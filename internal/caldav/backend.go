@@ -943,10 +943,10 @@ func shapeDiffs(in proton.EventInput, row proton.Event) []string {
 
 // detectOwnRSVPLenient is the fallback of detectOwnRSVP for events organized by
 // a THIRD PARTY only (the caller guarantees it): it recognizes a reply when
-// exactly one invitee's PARTSTAT changes, that invitee is an account address
+// exactly one ACCOUNT invitee's PARTSTAT changes, that invitee
 // with a patchable attendeeID, and the new status is a real reply (not
 // NEEDS-ACTION). Everything else in the PUT (texts, times, alarms, other
-// invitees' parameters, invitees unknown to the row) is IGNORED — the caller
+// invitees' parameters and PARTSTATs, invitees unknown to the row) is IGNORED — the caller
 // only ever PATCHes the owner's status, so the third party's event is never
 // rewritten whatever the client round-tripped. Invitees are matched by email,
 // case-insensitively, tolerating a "mailto:" prefix. diffs lists the NAMES of the
@@ -965,7 +965,10 @@ func (b *Backend) detectOwnRSVPLenient(in proton.EventInput, row proton.Event) (
 	changed := 0
 	for _, at := range in.Attendees {
 		rat, found := rowByEmail[normAddr(at.Email)]
-		if !found {
+		if !found || !b.isOwner(normAddr(at.Email)) {
+			// Third parties' PARTSTATs are never written back (only the owner's
+			// row is PATCHed), so a client echoing stale values for them must
+			// not block the owner's reply.
 			continue
 		}
 		ns := statusFromPartstat(at.Partstat)
@@ -973,7 +976,7 @@ func (b *Backend) detectOwnRSVPLenient(in proton.EventInput, row proton.Event) (
 			continue
 		}
 		changed++
-		if changed > 1 || !b.isOwner(normAddr(at.Email)) || rat.ID == "" || ns == 0 {
+		if changed > 1 || rat.ID == "" || ns == 0 {
 			return rsvpReply{}, nil, false
 		}
 		reply = rsvpReply{attendee: rat, newStatus: ns, partstat: partstatFromStatus(ns)}

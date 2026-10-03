@@ -342,3 +342,34 @@ func assertForeign403(t *testing.T, err error, src *fakeSource, sender *fakeSend
 		t.Errorf("side effects on a refused PUT: sent=%d updated=%d created=%d", len(sender.sent), src.updated, src.created)
 	}
 }
+
+// TestRSVPLenientIgnoresThirdPartyPartstat: the client echoes a stale PARTSTAT
+// for another invitee while the owner accepts — third parties' statuses are never
+// written back, so the owner's reply still goes through, and only the owner's row
+// moves.
+func TestRSVPLenientIgnoresThirdPartyPartstat(t *testing.T) {
+	b, src, sender, organizer := receivedInvitationBackend(t)
+	src.events["cal1"][0].Attendees = append(src.events["cal1"][0].Attendees,
+		proton.Attendee{Email: "carol@example.com", Status: 0, Token: "tok-carol", ID: "att-carol"})
+	mutate := func(v *ical.Component) {
+		p := ical.NewProp(ical.PropAttendee)
+		p.Params.Set(ical.ParamParticipationStatus, "ACCEPTED")
+		p.Value = "mailto:carol@example.com"
+		v.Props.Add(p)
+	}
+	if _, err := b.PutCalendarObject(context.Background(), "/alice/calendars/cal1/recv1.ics", receivedPUT(t, "ACCEPTED", mutate), nil); err != nil {
+		t.Fatalf("owner reply blocked by a third-party PARTSTAT echo: %v", err)
+	}
+	if src.updated != 0 || src.created != 0 {
+		t.Errorf("third party's event rewritten (created=%d updated=%d)", src.created, src.updated)
+	}
+	ev, _ := src.GetEvent(context.Background(), "cal1", "recv1")
+	for _, at := range ev.Attendees {
+		if at.Email == "carol@example.com" && at.Status != 0 {
+			t.Fatalf("third party's status written: %+v", at)
+		}
+	}
+	if len(sender.sent) != 1 || sender.sent[0].To != organizer {
+		t.Fatalf("REPLY missing or misrouted: %+v", sender.sent)
+	}
+}
