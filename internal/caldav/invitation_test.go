@@ -407,6 +407,34 @@ func TestPutInviteUpdateForeign403(t *testing.T) {
 	}
 }
 
+// TestPutCancelledForeignRemoves: a third-party event its organizer cancelled
+// (STATUS:CANCELLED) — the attendee's PUT (iOS "Delete" = its own decline)
+// removes it from the calendar instead of bouncing forever on a 403; nothing
+// is sent (Anne, 2026-10-14).
+func TestPutCancelledForeignRemoves(t *testing.T) {
+	b, src, sender := newInviteBackend()
+	ctx := context.Background()
+	start := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Hour)
+	src.events["cal1"] = append(src.events["cal1"], proton.Event{
+		ID: "evC", UID: "uid-cancelled", CalendarID: "cal1", Title: "External meeting",
+		Start: start, End: start.Add(time.Hour), LastEdit: start, Status: "CANCELLED",
+		Organizer: "boss@extern.com",
+		Attendees: []proton.Attendee{{Email: "alice@example.com", Token: "tokA", Status: 0}},
+	})
+	cal := buildICS(t, "uid-cancelled", "External meeting", start, start.Add(time.Hour), false)
+	if err := putCal1(ctx, b, cal); err != nil {
+		t.Fatalf("PUT on a cancelled received invitation = %v, want success", err)
+	}
+	for _, ev := range src.events["cal1"] {
+		if ev.UID == "uid-cancelled" {
+			t.Fatalf("cancelled invitation still in the calendar")
+		}
+	}
+	if len(sender.sent) != 0 {
+		t.Fatalf("emails = %d, want 0", len(sender.sent))
+	}
+}
+
 // TestPutInviteUpdateDisabled403: [invite] absent + invited event on the
 // Proton side → update refused (pre-M5a preserved), nothing sent, nothing written.
 func TestPutInviteUpdateDisabled403(t *testing.T) {

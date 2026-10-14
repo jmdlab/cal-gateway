@@ -536,6 +536,27 @@ func (b *Backend) decideInvitePolicy(ctx context.Context, calID string, series s
 				return false, nil, obj, true, rerr
 			}
 		}
+		// CANCELLED BY ITS ORGANIZER: a third-party event the organizer has
+		// cancelled (STATUS:CANCELLED on the Proton side) is dead — there is
+		// nothing left to rewrite at the organizer. iOS offers "Delete" on it but
+		// sends a PUT (its own decline), which used to 403 ATTENDEE-FOREIGN: the
+		// event bounced back forever and the attendee could never get rid of it
+		// (Anne, 2026-10-14). Any PUT on it now means "remove it from MY calendar":
+		// same as an accepted DELETE, nobody is notified (the organizer already
+		// cancelled).
+		if masterRow != nil && masterRow.Organizer != "" && !b.isOwner(masterRow.Organizer) &&
+			strings.EqualFold(strings.TrimSpace(masterRow.Status), "CANCELLED") {
+			// go-webdav dereferences the returned object: an empty one = 201 with
+			// no ETag; the next sync finds the resource gone and drops it.
+			if derr := b.dropCancelledInvitation(ctx, calID, *masterRow, exceptions); derr != nil {
+				return false, nil, nil, true, derr
+			}
+			return false, nil, &webcaldav.CalendarObject{}, true, nil
+		}
+		var foreignDiag string
+		if masterRow != nil {
+			foreignDiag = b.foreignDiag(*series.master, *masterRow)
+		}
 		if len(series.master.Attendees) > 0 && !b.isOwner(series.master.Organizer) {
 			series.master.Attendees = nil
 			series.master.Organizer, series.master.OrganizerCN = "", ""
@@ -575,6 +596,7 @@ func (b *Backend) decideInvitePolicy(ctx context.Context, calID string, series s
 			// Proton app): the gateway is not the organizer — modifying it would
 			// falsify the state at the organizer and the other invitees. Honest
 			// refusal, edit in the Proton app.
+			log.Printf("cal-gateway: ATTENDEE-FOREIGN diag: %s", foreignDiag)
 			return false, nil, nil, false, webdav.NewHTTPError(http.StatusForbidden,
 				fmt.Errorf("%w: ATTENDEE-FOREIGN — this event is organized by %s; edit it in a Proton client", errICalRefused, masterRow.Organizer))
 		case len(series.children) > 0 || len(exceptions) > 0:
@@ -985,6 +1007,46 @@ func (b *Backend) detectOwnRSVPLenient(in proton.EventInput, row proton.Event) (
 		return rsvpReply{}, nil, false
 	}
 	return reply, diffs, true
+}
+
+// dropCancelledInvitation removes from the account's calendar every row (master
+// + exceptions) of a third-party event its organizer has cancelled. Nobody is
+// notified: the organizer already sent the CANCEL.
+func (b *Backend) dropCancelledInvitation(ctx context.Context, calID string, master proton.Event, exceptions map[int64]proton.Event) error {
+	for _, ex := range exceptions {
+		if err := b.src.DeleteEvent(ctx, calID, ex.ID); err != nil && !errors.Is(err, proton.ErrEventNotFound) {
+			return mapSourceError(err)
+		}
+	}
+	if err := b.src.DeleteEvent(ctx, calID, master.ID); err != nil && !errors.Is(err, proton.ErrEventNotFound) {
+		return mapSourceError(err)
+	}
+	log.Printf("cal-gateway: invitation annulée par son organisateur retirée du calendrier (uid tronqué %.8s…, %d exception(s))", master.UID, len(exceptions))
+	return nil
+}
+
+// foreignDiag explains an ATTENDEE-FOREIGN refusal with NAMES only (never
+// values nor addresses): stored STATUS, shape fields that moved, and whether an
+// account address sits in the stored / PUT invitee lists and changed PARTSTAT.
+func (b *Backend) foreignDiag(in proton.EventInput, row proton.Event) string {
+	ownerRow, ownerPut, moved := false, false, false
+	rowStatus := map[string]int{}
+	for _, at := range row.Attendees {
+		if b.isOwner(normAddr(at.Email)) {
+			ownerRow = true
+			rowStatus[normAddr(at.Email)] = at.Status
+		}
+	}
+	for _, at := range in.Attendees {
+		if a := normAddr(at.Email); b.isOwner(a) {
+			ownerPut = true
+			if st, ok := rowStatus[a]; ok && st != statusFromPartstat(at.Partstat) {
+				moved = true
+			}
+		}
+	}
+	return fmt.Sprintf("status=%q put_status=%q shape=%v invitees row=%d put=%d owner_in_row=%v owner_in_put=%v owner_partstat_moved=%v",
+		row.Status, in.Status, shapeDiffs(in, row), len(row.Attendees), len(in.Attendees), ownerRow, ownerPut, moved)
 }
 
 // normAddr normalizes a calendar address for comparison: optional "mailto:"
